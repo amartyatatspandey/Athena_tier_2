@@ -1,0 +1,206 @@
+"""Structure sourcing: RCSB PDB → AlphaFold DB → ESM Atlas fallback (Tier 2 Step 3)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal, Protocol
+
+from secondlook.alphafold import AlphaFoldError
+from secondlook.mutation_validation import MutationValidationResult
+from secondlook.rcsb import RcsbError
+
+PLDDT_RELIABILITY_THRESHOLD = 70.0
+ReliabilityFlag = Literal["high", "low"]
+StructureSource = Literal["PDB", "AlphaFoldDB", "ESMAtlas"]
+StructureStatus = Literal["found", "unavailable"]
+
+
+class PdbClient(Protocol):
+    def search_by_uniprot(
+        self, accession: str, preferred_ligands: tuple[str, ...] = ()
+    ) -> dict | None: ...
+
+
+class AlphaFoldClient(Protocol):
+    def fetch_models(self, accession: str) -> list[dict]: ...
+
+
+class EsmClient(Protocol):
+    def fold_sequence(self, sequence: str) -> str: ...
+
+
+@dataclass(frozen=True)
+class StructureResult:
+    status: StructureStatus
+    source: StructureSource | None
+    id: str | None
+    plddt_at_residue: float | None
+    plddt_global: float | None
+    reliability_flag: ReliabilityFlag | None
+    ligand_bound: bool | None
+    annotated_position: int | None
+    pdb_text: str | None = None
+    error_message: str | None = None
+
+
+def plddt_reliability(plddt: float) -> ReliabilityFlag:
+    return "low" if plddt < PLDDT_RELIABILITY_THRESHOLD else "high"
+
+
+def residue_b_factor_from_pdb(pdb_text: str, residue_number: int) -> float | None:
+    for line in pdb_text.splitlines():
+        if not line.startswith("ATOM"):
+            continue
+        if line[12:16].strip() != "CA":
+            continue
+        try:
+            resseq = int(line[22:26])
+        except ValueError:
+            continue
+        if resseq != residue_number:
+            continue
+        try:
+            return float(line[60:66])
+        except ValueError:
+            return None
+    return None
+
+
+def structure_unavailable_message(plddt: float | None) -> str:
+    shown = "n/a" if plddt is None else f"{plddt}"
+    return (
+        "Structural analysis unavailable or low-confidence for this region "
+        f"(pLDDT = {shown}, below reliability threshold). No structure-based binding "
+        "signal is reported. AlphaMissense functional score is shown as the only "
+        "available computational signal."
+    )
+
+
+def source_structure(
+    validation: MutationValidationResult,
+    *,
+    pdb_client: PdbClient | None = None,
+    alphafold_client: AlphaFoldClient | None = None,
+    esm_client: EsmClient | None = None,
+    allow_de_novo_folding: bool = False,
+    preferred_ligands: tuple[str, ...] = (),
+) -> StructureResult:
+    """Fetch a wild-type structure; never fold the mutant sequence."""
+    if pdb_client is None or alphafold_client is None or esm_client is None:
+        from secondlook.alphafold import AlphaFoldDbClient
+        from secondlook.esm_atlas import EsmAtlasClient
+        from secondlook.rcsb import RcsbPdbClient
+
+        pdb_client = pdb_client or RcsbPdbClient()
+        alphafold_client = alphafold_client or AlphaFoldDbClient()
+        esm_client = esm_client or EsmAtlasClient()
+
+    if validation.status != "valid" or validation.uniprot_accession is None or validation.position is None:
+        return _unavailable()
+
+    position = validation.position
+    accession = validation.uniprot_accession
+
+    try:
+        pdb_hit = pdb_client.search_by_uniprot(accession, preferred_ligands=preferred_ligands)
+    except RcsbError:
+        pdb_hit = None
+    if pdb_hit:
+        return StructureResult(
+            status="found",
+            source="PDB",
+            id=str(pdb_hit["pdb_id"]),
+            plddt_at_residue=None,
+            plddt_global=None,
+            reliability_flag="high",
+            ligand_bound=bool(pdb_hit.get("ligand_bound")),
+            annotated_position=position,
+            pdb_text=pdb_hit.get("pdb_text"),
+        )
+
+    try:
+        af_models = alphafold_client.fetch_models(accession)
+    except AlphaFoldError:
+        af_models = []
+    model = _select_alphafold_model(af_models, accession, position)
+    if model is not None:
+        pdb_text = model.get("pdb_text") or ""
+        if not pdb_text:
+            fetch_pdb = getattr(alphafold_client, "fetch_pdb", None)
+            if fetch_pdb is not None:
+                try:
+                    pdb_text = fetch_pdb(model) or ""
+                except AlphaFoldError:
+                    pdb_text = ""
+        residue_plddt = residue_b_factor_from_pdb(pdb_text, position)
+        global_plddt = model.get("global_metric")
+        score_for_flag = residue_plddt if residue_plddt is not None else global_plddt
+        flag: ReliabilityFlag | None = plddt_reliability(score_for_flag) if score_for_flag is not None else None
+        return StructureResult(
+            status="found",
+            source="AlphaFoldDB",
+            id=str(model["entry_id"]),
+            plddt_at_residue=residue_plddt,
+            plddt_global=float(global_plddt) if global_plddt is not None else None,
+            reliability_flag=flag,
+            ligand_bound=False,
+            annotated_position=position,
+            pdb_text=pdb_text or None,
+        )
+
+    if not allow_de_novo_folding or not validation.wildtype_sequence:
+        return _unavailable()
+
+    try:
+        folded = esm_client.fold_sequence(validation.wildtype_sequence)
+    except (TimeoutError, OSError, RuntimeError):
+        return _unavailable()
+
+    residue_plddt = residue_b_factor_from_pdb(folded, position)
+    flag = plddt_reliability(residue_plddt) if residue_plddt is not None else None
+    return StructureResult(
+        status="found",
+        source="ESMAtlas",
+        id=None,
+        plddt_at_residue=residue_plddt,
+        plddt_global=None,
+        reliability_flag=flag,
+        ligand_bound=False,
+        annotated_position=position,
+        pdb_text=folded,
+    )
+
+
+def _select_alphafold_model(models: list[dict], accession: str, position: int) -> dict | None:
+    covering = [
+        model
+        for model in models
+        if int(model.get("uniprot_start") or 0) <= position <= int(model.get("uniprot_end") or 0)
+    ]
+    if not covering:
+        return None
+
+    canonical_prefix = f"AF-{accession}-F"
+
+    def _rank(model: dict) -> tuple[int, int]:
+        entry_id = str(model.get("entry_id") or "")
+        canonical = 0 if entry_id.startswith(canonical_prefix) else 1
+        length = int(model.get("uniprot_end") or 0) - int(model.get("uniprot_start") or 0)
+        return (canonical, -length)
+
+    covering.sort(key=_rank)
+    return covering[0]
+
+
+def _unavailable(plddt: float | None = None) -> StructureResult:
+    return StructureResult(
+        status="unavailable",
+        source=None,
+        id=None,
+        plddt_at_residue=plddt,
+        plddt_global=None,
+        reliability_flag=None,
+        ligand_bound=None,
+        annotated_position=None,
+        error_message=structure_unavailable_message(plddt),
+    )

@@ -100,7 +100,15 @@ Test case: TP53 (P04637) — AlphaFold DB returns model AF-P04637-F1, globalMetr
 
 ### Prompt D — Candidate drug generation + SMILES fetch
 ```
-Build the candidate drug generation step for Tier 2 (docs/tier2-structural-prediction.md §Step 4). All three sources verified live:
+Before writing any client code: the last two modules you built (AlphaMissense/Ensembl VEP, then structure sourcing) both shipped with the same bug. Each external API client raised a custom error on failure (EnsemblError, RcsbError, AlphaFoldError), but the orchestrating function never caught it — so a live API outage crashed the whole pipeline instead of falling through to the next source or returning the documented "unavailable" result. Both had to be fixed after review, with tests added afterward to catch the regression.
+
+Do not repeat this. For every external call you add in this module (DGIdb, Open Targets, ChEMBL, PubChem):
+1. Give each client's failure a dedicated exception type (e.g. DgidbError, OpenTargetsError, ChemblError, PubChemError), same pattern as the existing modules.
+2. At the call site in the orchestrating function, catch that specific exception immediately and treat it as "this source returned nothing" — never let it propagate up uncaught. Do not use a bare except or catch Exception; catch the specific error type, the same way source_structure() now does for RcsbError/AlphaFoldError.
+3. Write a test for each source's failure path before considering the step done — simulate the client raising its error and assert the function falls through to the next source (DGIdb down → tries Open Targets; both down → tries ChEMBL) or returns the exact zero-candidates message from §8 if all three fail, rather than raising.
+4. The PubChem SMILES fetch is a per-candidate call in a loop — one candidate's PubChem failure must not abort the whole candidate list; catch it per-candidate and drop that candidate (or mark its SMILES unavailable) while the rest of the list still comes back.
+
+Now the actual task. Build the candidate drug generation step for Tier 2 (docs/tier2-structural-prediction.md §Step 4). All three sources verified live:
 
 1. DGIdb — query first, it's GraphQL not REST: POST https://dgidb.org/api/graphql with a query like:
    { genes(names: ["GENE_SYMBOL"]) { nodes { name interactions { drug { name } } } } }
