@@ -180,6 +180,40 @@ AutoDock Vina/smina fallback: implement receptor/ligand prep (protonation, grid 
 Test case: run the actual "Run example" flow (D30N, chain A, PDB 2Z4O, ligand 065) end to end through your Playwright client and confirm you parse -2.056 log(affinity fold change), Destabilizing, distance 2.814 Å — these are verified live values, use them as the integration test's expected result.
 ```
 
+### Prompt F — AutoDock Vina/smina docking fallback
+
+`src/secondlook/vina_dock.py` currently exists only as a stub — `VinaDockClient.score()` always raises `VinaError("not implemented yet")`. That was deliberate (see Prompt E): Vina/smina setup turned out to be its own real task, not something to bolt onto the mCSM-lig automation. Right now, any candidate whose ligand hasn't appeared in a deposited PDB structure — which is most PubChem/DGIdb candidates, per Prompt E's own finding — falls straight to "unavailable." This prompt replaces the stub with a working implementation.
+
+Same rule as every module since Prompt B: every failure point gets its own caught exception, no bare `except`/`Exception`, and a test for each failure path before calling it done.
+
+```
+Implement AutoDock Vina/smina docking in src/secondlook/vina_dock.py as the WT-vs-mutant binding-affinity fallback for Tier 2 Step 5, replacing the current VinaError stub. VinaDockClient.score(pdb_text, smiles, mutation, position) must return a BindingScore with status="scored", method="docking", per docs/tier2-structural-prediction.md §Step 5.
+
+Confirmed installable and already in the dev environment's reach: the `vina` PyPI package (1.2.7, AutoDock Vina's Python bindings) and `meeko` (0.7.1, ligand/receptor preparation for Vina). Use those rather than shelling out to a separate `smina` binary unless you hit a concrete limitation `vina`/`meeko` can't handle — if so, stop and tell me before adding a new external binary dependency.
+
+This is real, multi-step structural work — do not approximate or skip a step silently:
+
+1. **Receptor prep**: take the wild-type structure's PDB text (from Step 3), strip waters/heteroatoms except the target ligand, add hydrogens (protonate) at physiological pH, convert to the PDBQT format Vina needs. Use meeko's receptor preparation utilities, or openbabel/pdbfixer if meeko's coverage is insufficient — check meeko's actual API before assuming it does the whole job (research/confirm this, don't guess a method name).
+
+2. **Mutant structure**: per docs/tier2-structural-prediction.md's explicit "what NOT to build" list, you must NOT re-fold the mutant. The correct approach is in-place side-chain mutation of the existing wild-type structure — replace the residue at the validated position with the mutant amino acid's side chain, keeping the backbone fixed, then let a rotamer-placement step (if your prep library supports one) or Vina's own local search handle the new side chain's conformation. Research what's actually available for this in your prep pipeline (PyMOL's mutagenesis wizard via its Python API, or a simpler geometric side-chain swap) before implementing — this is a real methodological choice, not a detail to wing. If you can't find a defensible way to do this without a paid/unavailable tool, stop and tell me rather than shipping something that silently produces a wrong mutant structure.
+
+3. **Grid box**: center the docking search box on the co-crystallized ligand's coordinates in the wild-type structure (the ligand you're stripping out in step 1 tells you where it was) — this only works when Step 3's structure is ligand-bound, which is already a precondition score_binding() checks before reaching Vina (see binding.py's ligand_bound check). Pad the box with enough margin to let the candidate's SMILES-derived 3D conformer dock (a reasonable default, e.g. ligand bounding box + 5 Å per side, but confirm this is a sane default for Vina rather than assuming).
+
+4. **Ligand prep**: generate a 3D conformer from the candidate's SMILES (RDKit, or whatever meeko expects as input) and convert to PDBQT.
+
+5. **Dock twice**: run Vina against the prepared receptor once with the wild-type side chain, once with the mutant side chain, same grid box, same ligand. Report the delta (mutant docking score minus wild-type docking score) per §Step 5 — not either score alone.
+
+6. **Failure handling** — each of these needs a caught, specific exception and a fallback to BindingScore(status="unavailable", ...) with an accurate message (reuse the BINDING_UNAVAILABLE_MESSAGE pattern from binding.py — this is a binding-scoring failure, not a structure-quality failure, so do not reintroduce the pLDDT-message bug that was just fixed in Step 5's review):
+   - Receptor prep fails (bad protonation, missing atoms) → VinaError, caught in score_binding(), returns unavailable.
+   - No defensible mutant side-chain placement method available → VinaError, do not fabricate a structure.
+   - SMILES → 3D conformer generation fails (some candidate SMILES will be un-embeddable) → VinaError.
+   - Vina itself errors or times out on either the WT or mutant run → VinaError. Set a real timeout; a docking run has a bounded reasonable runtime, don't let it hang indefinitely.
+
+7. Write unit tests with fake/small inputs for each failure path, plus one real end-to-end docking test using an actual small ligand-bound PDB structure (reuse the TP53/9C5S case already verified live in Step 3, with a small real ligand from Step 4's candidate list) as an integration test — mark it `@pytest.mark.integration` like the rest, and note in the test that Vina docking scores are stochastic-ish (seed it if the library allows, otherwise assert direction/plausibility rather than an exact float).
+
+This is very likely the largest single unit of work in the Tier 2 pipeline so far — structure prep is explicitly called out as "the hard part" in tech-stack-setup.md. If any single step here (especially step 2, mutant side-chain placement) turns out too large to finish well in one pass, stop and tell me which part, rather than shipping a version that silently produces plausible-looking but methodologically unsound docking scores — that's a worse outcome than "docking unavailable, AlphaMissense + structural context only."
+```
+
 ## Not yet ready for a Cursor prompt
 
 - **CTRI (Tier 1)** — not verified in this pass (out of scope for "Tier 2" per this session), still flagged unconfirmed in `data-sources.md`.

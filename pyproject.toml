@@ -12,6 +12,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "playwright>=1.49",
+    "vina>=1.2.7",
+    "meeko>=0.7.1",
+    "rdkit",
+    "pdbfixer",
+    "scipy",
+    "gemmi",
 ]
 
 [build-system]
