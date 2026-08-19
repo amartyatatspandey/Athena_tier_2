@@ -40,12 +40,26 @@ Inspected the live form at `https://biosig.lab.uq.edu.au/mcsm_lig/prediction`:
 - No JSON API, no documented batch endpoint, no rate-limit docs (matches `data-sources.md`'s existing caution).
 - Form posts to `https://biosig.lab.uq.edu.au/mcsm_lig/...` — technically inspectable, but scripting an undocumented endpoint on someone else's interactive-only academic server isn't something to do without asking them; not something I did or recommend automating.
 
-**Decision needed before Step 5 gets built** — pick one:
-1. **Demo-only path (matches validation-plan.md anyway):** manually submit the 2 locked demo cases through the form once, cache the results locally. No live dependency at all. Lowest risk, fits the "never call mCSM-lig live on stage" rule already in the docs.
-2. **Semi-live path:** for any case beyond the 2 cached demos, skip binding-affinity scoring entirely and fall back to the AlphaMissense-only + binding-pocket-distance output (this fallback is already specified in `validation-plan.md`'s "if overall pass rate is below threshold" clause — you'd just be invoking it by default for non-demo cases rather than conditionally).
-3. **Local docking path:** use AutoDock Vina/smina (confirmed installable) for anything beyond the cached demo cases, treating mCSM-lig as demo-only and Vina as the "live" fallback method. More setup work (structure prep is real effort per the existing docs) but gives you a scriptable live path.
+**Decision: automate it.** Confirmed live (2026-08-20) that this is safe to do responsibly:
 
-Recommend **option 1 + 3**: cache mCSM-lig for the 2 demo cases (best accuracy, ρ up to 0.67), use Vina/smina for anything else so the live query path still returns *something* scored rather than immediately punting to AlphaMissense-only.
+- Submitted the "Run example" form (D30N, chain A, PDB 2Z4O) and got a result back **synchronously** — a few seconds, one request/response, no job queue, no email/polling. That makes scripted automation straightforward rather than the async-job problem it could have been.
+- The result page is plain server-rendered HTML with clearly labeled fields, reliably parseable:
+  ```
+  Predicted Affinity Change: -2.056 log(affinity fold change) - Destabilizing
+  Wild-type: D
+  Position: 30
+  Mutant-type: N
+  Chain: A
+  Ligand ID: 065
+  Distance to ligand: 2.814 Å
+  DUET stability change: -0.087 Kcal/mol
+  ```
+- The submission form's real fields (read from the live DOM, not guessed): `wild` (file upload), `pdb_code` (text, alternative to file), `mutation` (text, e.g. `D30N`), `chain` (text), `lig_id` (text, ligand 3-letter code), `affin_wt` (text, optional — purpose unconfirmed, leave blank unless Cursor's testing shows it's required), submit button `name="run" value="single"`. The static `<form action=...>` attribute reads `run_example` with `method="get"`, but that's the default state before JS rewrites it on submit — the actual POST target must be discovered by driving the real page (see Prompt E), not by replaying a guessed URL.
+- No documented rate limit still stands, so automation must stay conservative and serial: one submission at a time, a real delay between calls (not concurrent/bulk), and a generous timeout with a clean fallback rather than a hang. This is a shared academic server, not a rate-limited public API — scripted politeness here isn't optional.
+
+Given the synchronous, cleanly-parseable response, the most robust automation approach is a **headless browser (Playwright)** filling the actual HTML form and reading the rendered result page — not replaying a hand-built HTTP POST — since JS owns the real submit behavior and a raw POST could silently break on any front-end change. This also means the automated path degrades the same way a human user's would if the site changes, rather than failing in some confusing lower-level way.
+
+AutoDock Vina/smina (confirmed installable) stays as the fallback for anything mCSM-lig itself can't handle (timeout, form rejects the input, no ligand-bound structure available) — see Prompt E.
 
 ## Cursor prompts — ready to build now
 
@@ -126,7 +140,46 @@ Zero-candidates case: return the exact message from §8 ("No candidate drugs tar
 Test case: TP53 — DGIdb returns real hits (PIRARUBICIN, OXALIPLATIN, CARBOPLATIN, etc., verified live).
 ```
 
+### Prompt E — Binding affinity via automated mCSM-lig submission
+```
+Same rule as last time: every external call gets its own exception type, caught at the specific call site, with a test for the failure path — do not let anything here propagate uncaught. This module has more ways to fail than the previous ones (browser automation, file uploads, a slower external computation), so be thorough.
+
+Build the binding-affinity step for Tier 2 (docs/tier2-structural-prediction.md §Step 5), automating mCSM-lig submission via headless browser (Playwright) rather than a hand-built HTTP POST — the form's actual submit behavior is owned by client-side JS (confirmed live: the static form action reads "run_example"/GET even though real submission needs the "single" button and a POST-shaped multipart body), so driving the real page is more robust than replaying a guessed request, and it degrades the same way a human user's session would if the site changes anything.
+
+Target: https://biosig.lab.uq.edu.au/mcsm_lig/prediction
+
+Form fields (confirmed live from the DOM):
+- `pdb_code` (text) — 4-letter PDB code; use this rather than the `wild` file-upload field, since Step 3's structure sourcing already gives you a PDB ID when the source is "PDB". If the structure came from AlphaFold DB instead (no PDB ID), you'll need the `wild` file upload with the AlphaFold model's PDB text instead — handle both paths.
+- `mutation` (text) — shorthand like "D30N" (wild-type single-letter + position + mutant single-letter). Build this from the validated mutation result (Prompt A), not user input directly.
+- `chain` (text) — the PDB chain letter the mutation is on. You'll need to resolve which chain in the fetched structure corresponds to the UniProt-numbered position — do not assume chain "A" always; check it against the structure (SIFTS PDB-UniProt residue mapping, or parse chain identifiers from the PDB file directly).
+- `lig_id` (text) — 3-letter ligand code (HET code) of the bound ligand to score against. Comes from Step 4's candidate list — you'll need the candidate drug's PDB HET code, not its PubChem SMILES; these are different identifiers. If a candidate has no known HET code (most won't, since HET codes only exist for ligands that have appeared in a deposited PDB structure), you cannot run mCSM-lig for that candidate — fall back to AutoDock Vina/smina for it instead (see below), not to skipping it.
+- `affin_wt` (text) — optional, purpose unconfirmed from the live check. Leave blank first; if the result looks wrong or the form rejects blank, investigate what it expects (test manually, don't guess).
+- Submit via the button with name="run" value="single".
+
+Parse the result page (server-rendered HTML, plain labeled text, confirmed live format):
+  Predicted Affinity Change: {float} log(affinity fold change) - {Destabilizing|Stabilizing}
+  Wild-type: {residue}
+  Position: {int}
+  Mutant-type: {residue}
+  Chain: {letter}
+  Ligand ID: {3-letter code}
+  Distance to ligand: {float} Å
+  DUET stability change: {float} Kcal/mol
+Extract at minimum the affinity fold-change delta and the stabilizing/destabilizing label — that's the "delta" required by §Step 5 ("mutant score minus wild-type score... report the delta, not an absolute score alone" — confirm whether mCSM-lig's reported number already is that delta, which it appears to be, or whether it needs combining with anything else).
+
+Rate limiting / etiquette (no documented limit exists, so be conservative on your own initiative): one submission at a time, never concurrent; a real delay (a few seconds minimum) between submissions if scoring multiple candidates for the same mutation; a generous timeout (60s+, since this is a real structural computation, not a fast API) with a clean failure rather than a hang.
+
+Failure handling — every one of these needs its own caught exception type and a fallback, not a crash:
+- Playwright can't reach the page / page structure changed (selectors don't match) → treat as mCSM-lig unavailable for this candidate, fall back to AutoDock Vina/smina.
+- Form submission times out → same fallback.
+- No HET code available for a candidate's ligand → same fallback (this will be the common case, not an edge case — most PubChem/DGIdb candidates won't have appeared in a deposited PDB structure).
+- Structure has no bound ligand at all (Step 3 returned an apo structure) → mCSM-lig cannot run for any candidate on this case; go straight to Vina/smina for all candidates, or if Vina/smina also isn't feasible for this case, return the §8 framing that only AlphaMissense + structural context is available.
+
+AutoDock Vina/smina fallback: implement receptor/ligand prep (protonation, grid box centered on the binding site — use Step 3's structure and Step 4's SMILES) and a docking run comparing wild-type vs. mutant structure scores. This is real, nontrivial setup work per the existing docs — build it as a clearly separate function/module from the mCSM-lig client, not fused together, so each can be tested independently. If Vina/smina setup for this prompt turns out too large to do alongside mCSM-lig automation in one pass, stop and tell me — we'll split it into its own prompt rather than rushing it.
+
+Test case: run the actual "Run example" flow (D30N, chain A, PDB 2Z4O, ligand 065) end to end through your Playwright client and confirm you parse -2.056 log(affinity fold change), Destabilizing, distance 2.814 Å — these are verified live values, use them as the integration test's expected result.
+```
+
 ## Not yet ready for a Cursor prompt
 
-- **Step 5 (binding affinity)** — blocked on the mCSM-lig decision above. Once you pick an option, I'll write the corresponding prompt (manual-cache tooling for options 1, or a Vina/smina prep+dock pipeline for option 3).
 - **CTRI (Tier 1)** — not verified in this pass (out of scope for "Tier 2" per this session), still flagged unconfirmed in `data-sources.md`.
