@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 dist/
 build/
+
+# Local-only upstream clones for reading — never part of Athena's GitHub
+reference_repos/
