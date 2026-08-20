@@ -6,8 +6,8 @@
 |---|---|---|
 | Backend | Python, FastAPI | Fast to build, good async support for multiple external API calls |
 | Frontend | Streamlit (fastest) or React | Streamlit if UI needs to be built quickly with limited frontend time; React if you want the tier-distinction styling in `ui-flow.md` to look polished |
-| Graph | NetworkX (in-memory) or Neo4j free tier | NetworkX is zero-setup for demo scale; use Neo4j only if the team already knows it |
-| Embeddings/RAG | sentence-transformers | Free, local, no API cost |
+| Graph | FalkorDB (Redis-based, Cypher-compatible, native vector index) | Not NetworkX/Neo4j — one engine serves both the CIViC graph traversal and the Literature RAG's semantic search (see `tier1-retrieval.md` §1), so hackathon-scale and any later production build share the same storage engine rather than requiring a migration |
+| Embeddings/RAG | sentence-transformers for embedding generation; vectors stored/queried via FalkorDB's native vector index | Free, local, no API cost; no separate vector store to stand up |
 | LLM | Whatever API access you have | Must support structured/constrained output for the citation-enforcement rule in `api-contracts.md` |
 | Mutation parsing | `hgvs` (PyPI), Mutalyzer API | |
 | Structural prediction | AlphaFold DB lookups + RCSB PDB (primary); ColabFold only as last resort, never on demo path | |

@@ -11,8 +11,8 @@ Structured case object from the doctor form (see `ui-flow.md`): cancer type, gen
 ### 1. Knowledge graph — CIViC backbone
 - Source: CIViC (Clinical Interpretation of Variants in Cancer), open, no license required.
 - Structure: variant → disease → drug → evidence item, with an evidence level (A–E) per CIViC's own scale.
-- Implementation for hackathon scale: in-memory graph (NetworkX) or Neo4j free tier, pre-loaded for a defined set of well-documented cancer types (include sarcoma, to tie back to RareCure's own validation cohort).
-- Query: given gene + mutation, traverse to connected drugs and their evidence items.
+- Implementation: **FalkorDB** (Redis-based property graph, Cypher-compatible, with a native vector index in the same engine) — not NetworkX/Neo4j. This is a deliberate choice, not just a swap: FalkorDB lets a single query combine structured Cypher traversal (gene → variant → drug → evidence) with semantic search over evidence/literature text in one retrieval pass, which is the actual mechanism the literature-RAG component (§3 below) needs — no separate vector store to stitch together in application code. It also means the hackathon-scale build and a later production build are the same storage engine, not a migration. Pre-load for a defined set of well-documented cancer types (include sarcoma, to tie back to RareCure's own validation cohort).
+- Query: given gene + mutation, traverse to connected drugs and their evidence items via Cypher; where a query has no exact structured match, fall back to vector search over the same graph's evidence-item embeddings before declaring a miss (see hybrid retrieval note below).
 
 ### 2. Clinical trial search
 - Sources: ClinicalTrials.gov API v2 (global) + CTRI — Clinical Trials Registry India (ctri.nic.in) for India-relevant trials.
@@ -46,4 +46,4 @@ Each Tier 1 result item: `{type: "documented", source: "CIViC" | "ClinicalTrials
 
 ## What NOT to build for V1
 - Full NLP extraction pipeline to build the graph from raw literature — use CIViC's already-structured data instead.
-- Production-scale graph DB — in-memory is fine for a demo-scale, pre-loaded cancer-type subset.
+- A separate vector store for the Literature RAG component — FalkorDB's native vector index handles this in the same engine as the graph; don't stand up a second system to stitch together in application code.
