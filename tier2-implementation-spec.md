@@ -4,6 +4,14 @@ Project: SecondLook (AI second-opinion copilot for rare and treatment-exhausted 
 
 Source docs this spec is derived from, in order of authority: `docs/checkpoint.md` (current build state — read this first), `docs/tier2-structural-prediction.md` (the build-ready pipeline spec), `docs/tier2-verification.md` (live source verification + the six Cursor prompts used to build Steps 1–5b), `docs/api-contracts.md` (the exact output schema), `docs/validation-plan.md` (the gold-standard test set), `docs/data-sources.md`, `docs/tech-stack-setup.md`, `docs/rarecure-build-reference.md` (failure modes to avoid, several directly relevant to the remaining work), `docs/founder-mode-use-case-and-kg-solutions.md` (the capability gap Tier 2's current scope leaves open, and the post-V1 extension paths), `tier1-implementation-spec.md` (the knowledge graph Tier 2's output feeds into).
 
+## 0. Delegation model — who owns what
+
+This document is now **lead-owned**. It covers everything requiring full-system judgment: the Step 7 architecture, the Step 6 threshold decision, and the two open decisions in §7. All of it either produces a decision that's expensive to unwind, or requires holding the whole pipeline's contracts in your head at once.
+
+Everything mechanical-but-real — has a clear "done" state, doesn't require system-wide judgment, and shouldn't need you in the loop mid-task — is delegated to **`tier2-junior-tasks.md`**, a self-contained document the junior can work from without reading this spec end-to-end. The handoff points are marked inline below with → **[JUNIOR]**.
+
+The dependency order matters: Deliverable 2 (Step 7, lead) has to exist before **[JUNIOR] Task 1** can run; **[JUNIOR] Task 1**'s raw data has to exist before the lead can make the Step 6 cutoff decision (Deliverable 1); the cutoff has to be decided before **[JUNIOR] Task 5** (implementing `labeling.py`) can start. `tier2-junior-tasks.md` states these dependencies explicitly so the junior knows what they're blocked on and what to flag back to you rather than guess past.
+
 ---
 
 ## 1. Scope and task
@@ -128,13 +136,9 @@ Whether Step 7 writes to FalkorDB directly or returns objects for the orchestrat
 
 ## 5. Deliverables — what "done" looks like
 
-1. **`labeling.py` — Step 6 threshold labeling.**
-   - A pure function taking `delta_score` (plus method/confidence context) returning one of three defined labels via a **versioned, named constant** threshold — never an inline magic number.
-   - Unit tests asserting the function only ever emits one of the three defined label strings — a **post-condition assert**, not just happy-path tests. This directly addresses the RareCure `clamp_weights` failure mode: an output documented as bounded silently wasn't, and the unit test's threshold had been set to accommodate the escape (`<= 0.85` against a real bound of `0.60`) rather than catch it. The test must assert the *real* contract, not the current behavior.
-   - Method-aware confidence: an mCSM-lig-derived label and a Vina-derived label must not carry identical confidence framing (§1.3 item 6).
-   - Chosen cutoff and its provenance (which validation run produced it) documented in code comments, referencing `validation-plan.md`.
+Lead-owned work only. Delegated tasks are marked → **[JUNIOR]** with the corresponding task number in `tier2-junior-tasks.md`; they're listed here too so the full Step 6/7 picture stays in one place, but the actual instructions live in the junior doc.
 
-2. **Pipeline orchestration function (Step 7).**
+1. **Pipeline orchestration function (Step 7) — build this first, everything else depends on it.**
    - Single entry point: given a validated case (gene, mutation notation), runs Steps 1→6, loops Steps 5–6 per candidate, returns `api-contracts.md`-shaped items:
      ```json
      {
@@ -154,16 +158,25 @@ Whether Step 7 writes to FalkorDB directly or returns objects for the orchestrat
    - Every exact §8 failure message (reference-residue mismatch, out-of-scope type, structure unavailable/low-confidence, zero candidates, timeout/API error) returned as a **structured failure object** when triggered — never a silent empty list or `null`. Reuses the `BINDING_UNAVAILABLE_MESSAGE` split already fixed in `binding.py` rather than reintroducing the pLDDT-message conflation bug.
    - Emits graph-ready `StructuralSignal` objects per §4.
    - Integration test running end-to-end on TP53 R175H (values already verified at each individual step) as a smoke test.
+   - This is the piece that requires holding every module's contract in your head simultaneously — not a good delegation target even though individual pieces of it (writing one more integration test, say) look small in isolation. Keep it.
 
-3. **Validation run artifact.** A script or notebook running all nine gold-standard cases through Step 7, producing a results table (case, predicted label, known direction, method used, pass/fail). Stored in the repo (e.g. `validation/results.md`) so the pass rate and the two hard-required positive-control outcomes are **auditable, not just asserted in a PR description**. Include the mCSM-lig vs. Vina split per case — that ratio is the evidence for Deliverable 5.
+2. **→ [JUNIOR] Task 1 — run the nine gold-standard cases.** Once Deliverable 1 exists, hand the pipeline function to the junior. They run all nine `validation-plan.md` cases through it and produce the raw results table (predicted delta/method per case) — no interpretation, no pass/fail call. That call is yours (item 3 below).
 
-4. **Demo-case cache.** Serialized, pre-computed full pipeline output for the locked demo case, stored locally, with a clear "cached, not live" marker consistent with `ui-flow.md` Screen 3's requirement to show cached-result indicators rather than hide them.
+3. **Step 6 threshold decision — yours, informed by Task 1's data.**
+   - Look at Task 1's raw results against `validation-plan.md`'s pre-committed pass criteria (≥70% correct directionality; BRAF V600E/vemurafenib and EGFR T790M/osimertinib — the two positive controls — must both show retained/increased binding, no exceptions). **Do not adjust the criteria after seeing the results.**
+   - Pick the numeric delta-score cutoff that separates the three labels, as a versioned constant. → **[JUNIOR] Task 6** can hand you a literature-grounded starting range (mCSM-lig/Vina delta magnitudes treated as meaningful in comparable published validations) before you commit to a number — use it as input, not as the decision itself.
+   - If the ≥70% threshold isn't met: invoke the documented fallback (drop the binding-affinity delta/label from the UI, keep AlphaMissense + binding-pocket-proximity only). This is a legitimate, pre-authorized outcome per `validation-plan.md`, not something to relitigate under demo-timeline pressure.
+   - Once decided, hand the exact cutoff value + label boundaries to **[JUNIOR] Task 5**, who implements `labeling.py` to that exact spec.
 
-5. **Vina coverage note.** A short repo doc or code-comment section stating the actual proportion of validation-case candidates scored via Vina vs. mCSM-lig, and confirming Step 6's framing reflects the accuracy difference rather than treating them as equivalent-confidence signals.
+4. **→ [JUNIOR] Task 2 — Vina coverage tally**, computed from Task 1's raw data.
 
-6. **Written recommendation on the open decisions** (§7) — a PR description or `docs/` addendum is enough; the point is making the call explicitly.
+5. **→ [JUNIOR] Task 3 — demo-case caching.** You lock *which* gold-standard case is the demo case (a judgment call — sarcoma-related if possible, per `validation-plan.md`'s tie-back to RareCure's cohort); the junior executes the caching itself.
 
-7. **Verification pass before calling this done:** rerun the full suite (`pytest`, then `pytest -m integration` separately against live services); confirm no bare `except`/`Exception` introduced anywhere in Steps 6–7; confirm every new external-facing failure path has its own test; confirm the assembled output for at least one real case validates against the `api-contracts.md` schema field-for-field — including that `label` derives only from the versioned threshold constant, never a per-case override.
+6. **→ [JUNIOR] Task 4 — verification-pass checklist** (test suite, bare-except grep, schema field-for-field check). Review their report before merging; don't rerun it yourself unless something in it looks off.
+
+7. **Written recommendation on the open decisions** (§7) — yours. These are architecture calls (graph write responsibility, shared-doc split) that shape how Tier 1 and Tier 2 integrate; a PR description or `docs/` addendum is enough, but the call itself isn't delegable.
+
+8. **Final review and merge** of every junior-produced artifact before it lands — the delegation model in §0 assumes you're the last check on each handoff, not a bystander to it.
 
 ---
 
