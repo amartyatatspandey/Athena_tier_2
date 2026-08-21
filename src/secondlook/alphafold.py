@@ -46,11 +46,11 @@ class AlphaFoldDbClient:
         return self._get(pdb_url).text
 
     def _get(self, url: str) -> httpx.Response:
-        if self._client is not None:
-            response = self._client.get(url, timeout=40.0)
-        else:
-            response = httpx.get(url, timeout=40.0, follow_redirects=True)
         try:
+            if self._client is not None:
+                response = self._client.get(url, timeout=40.0)
+            else:
+                response = httpx.get(url, timeout=40.0, follow_redirects=True)
             if response.status_code != 404:
                 response.raise_for_status()
         except httpx.HTTPError as exc:

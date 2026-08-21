@@ -180,11 +180,11 @@ class RcsbPdbClient:
         return text
 
     def _request(self, method: str, url: str, json: dict | None = None) -> httpx.Response:
-        if self._client is not None:
-            response = self._client.request(method, url, json=json, timeout=40.0)
-        else:
-            response = httpx.request(method, url, json=json, timeout=40.0, follow_redirects=True)
         try:
+            if self._client is not None:
+                response = self._client.request(method, url, json=json, timeout=40.0)
+            else:
+                response = httpx.request(method, url, json=json, timeout=40.0, follow_redirects=True)
             if response.status_code != 204:
                 response.raise_for_status()
         except httpx.HTTPError as exc:

@@ -137,6 +137,25 @@ def test_protein_atoms_only_strips_heteroatoms():
     assert "CA" in protein
 
 
+ALTLOC_PDB = """\
+ATOM      1  N  AARG A  30      0.000   0.000   0.000  0.60 20.00           N
+ATOM      2  N  BARG A  30      0.100   0.100   0.100  0.40 20.00           N
+ATOM      3  CA  ARG A  30      1.000   0.000   0.000  1.00 20.00           C
+"""
+
+
+def test_protein_atoms_only_keeps_one_altloc_not_both():
+    # Regression: real crystal structures (e.g. PDB 8PQD, KIT D816V) have
+    # alternate-conformation atoms (altLoc A/B) for the same position. Feeding
+    # both copies to meeko's automatic bond/valence perception produced
+    # "Explicit valence ... greater than permitted" — meeko can't tell the two
+    # overlapping N atoms apart. Keep only the blank/'A' altLoc copy.
+    protein = protein_atoms_only(ALTLOC_PDB)
+    n_lines = [line for line in protein.splitlines() if line.startswith("ATOM") and line[12:16].strip() == "N"]
+    assert len(n_lines) == 1
+    assert n_lines[0][16] == "A"
+
+
 def test_score_reports_mutant_minus_wildtype_delta():
     dock = FakeDock(scores=[-8.0, -6.5])
     client = VinaDockClient(

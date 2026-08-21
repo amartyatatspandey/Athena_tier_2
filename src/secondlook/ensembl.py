@@ -75,11 +75,11 @@ def _ensembl_get_json(
 ) -> dict | list:
     url = f"{base_url}{path}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if client is not None:
-        response = client.get(url, params=params, headers=headers, timeout=40.0)
-    else:
-        response = httpx.get(url, params=params, headers=headers, timeout=40.0, follow_redirects=True)
     try:
+        if client is not None:
+            response = client.get(url, params=params, headers=headers, timeout=40.0)
+        else:
+            response = httpx.get(url, params=params, headers=headers, timeout=40.0, follow_redirects=True)
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise EnsemblError(f"Ensembl request failed for {url}") from exc

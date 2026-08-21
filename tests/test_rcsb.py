@@ -1,6 +1,22 @@
+import httpx
 import pytest
 
 from secondlook.rcsb import RcsbError, RcsbPdbClient, _covers_residue
+
+
+class ConnectionResetClient:
+    """Simulates a connection-level failure (no response object ever exists) —
+    distinct from an HTTP status error, which already has a response to call
+    raise_for_status() on."""
+
+    def request(self, method, url, json=None, timeout=None):
+        raise httpx.ConnectError("Connection reset by peer")
+
+
+def test_connection_error_is_wrapped_not_raised_raw():
+    client = RcsbPdbClient(client=ConnectionResetClient())
+    with pytest.raises(RcsbError):
+        client._fetch_pdb_text("9C5S")
 
 MINI_PDB_175 = """\
 ATOM      1  CA  ARG A 175      1.000   0.000   0.000  1.00 96.62           C

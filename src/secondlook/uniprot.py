@@ -56,11 +56,11 @@ class UniProtSequenceProvider:
 
     def _request(self, method: str, path: str, params: dict[str, str] | None = None) -> httpx.Response:
         url = f"{self.base_url}{path}"
-        if self._client is not None:
-            response = self._client.request(method, url, params=params, timeout=30.0)
-        else:
-            response = httpx.request(method, url, params=params, timeout=30.0, follow_redirects=True)
         try:
+            if self._client is not None:
+                response = self._client.request(method, url, params=params, timeout=30.0)
+            else:
+                response = httpx.request(method, url, params=params, timeout=30.0, follow_redirects=True)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise UniProtLookupError(f"UniProt request failed for {url}") from exc

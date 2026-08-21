@@ -1,7 +1,23 @@
+import httpx
 import pytest
 
 from secondlook.mutation_validation import validate_mutation
-from secondlook.uniprot import parse_uniprot_fasta
+from secondlook.uniprot import UniProtLookupError, UniProtSequenceProvider, parse_uniprot_fasta
+
+
+class ConnectionResetClient:
+    """Simulates a connection-level failure (no response object ever exists) —
+    distinct from an HTTP status error, which already has a response to call
+    raise_for_status() on."""
+
+    def request(self, method, url, params=None, timeout=None):
+        raise httpx.ConnectError("Connection reset by peer")
+
+
+def test_connection_error_is_wrapped_not_raised_raw():
+    provider = UniProtSequenceProvider(client=ConnectionResetClient())
+    with pytest.raises(UniProtLookupError):
+        provider.fetch("P04637")
 
 
 def test_parse_uniprot_fasta_records_accession_gene_and_version():

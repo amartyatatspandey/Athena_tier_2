@@ -158,8 +158,16 @@ def grid_box_from_pdb(pdb_text: str, padding: float = DEFAULT_PADDING_ANGSTROM) 
     return GridBox(center=center, size=size)
 
 
+_PREFERRED_ALTLOCS = (" ", "A")
+
+
 def protein_atoms_only(pdb_text: str) -> str:
-    kept = [line for line in pdb_text.splitlines() if line.startswith(("ATOM", "TER", "END"))]
+    kept = [
+        line
+        for line in pdb_text.splitlines()
+        if line.startswith(("TER", "END"))
+        or (line.startswith("ATOM") and (line[16] in _PREFERRED_ALTLOCS))
+    ]
     if not any(line.startswith("ATOM") for line in kept):
         raise ReceptorPrepError("PDB text has no ATOM records for receptor prep")
     return "\n".join(kept) + "\n"

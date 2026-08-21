@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from secondlook.alphamissense import (
@@ -6,8 +7,22 @@ from secondlook.alphamissense import (
     lookup_alphamissense,
     protein_sub_to_hgvs_c,
 )
-from secondlook.ensembl import EnsemblError
+from secondlook.ensembl import EnsemblError, EnsemblVepClient
 from secondlook.mutation_validation import MutationValidationResult
+
+
+class ReadTimeoutClient:
+    """Simulates a connection-level failure (timeout before any response
+    object exists) — distinct from an HTTP status error."""
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        raise httpx.ReadTimeout("timed out")
+
+
+def test_read_timeout_is_wrapped_not_raised_raw():
+    client = EnsemblVepClient(client=ReadTimeoutClient())
+    with pytest.raises(EnsemblError):
+        client.lookup_hgvs("ENST00000269305", "c.524G>A")
 
 
 def test_classifies_paper_thresholds_inclusive_on_upper_bound():
