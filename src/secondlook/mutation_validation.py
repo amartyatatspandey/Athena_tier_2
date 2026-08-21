@@ -69,7 +69,14 @@ def normalize_protein_notation(notation: str) -> str:
     if match is None:
         return notation
     ref, position, alt = match.groups()
-    return f"p.{aa1_to_aa3(ref)}{position}{aa1_to_aa3(alt)}"
+    try:
+        return f"p.{aa1_to_aa3(ref)}{position}{aa1_to_aa3(alt)}"
+    except KeyError:
+        # Matched the shorthand pattern (single uppercase letters) but one of them
+        # isn't a real amino acid code (e.g. "Z175H" — Z is not a standard residue).
+        # Fall through unchanged so the HGVS parser rejects it as invalid notation
+        # (caught below, routed to the safe _unsupported() path) instead of crashing.
+        return notation
 
 
 def reference_mismatch_message(claimed: str, position: int, actual: str) -> str:
@@ -116,6 +123,12 @@ def validate_mutation(
     alt = str(posedit.edit.alt)
     if claimed_ref == alt:
         return _unsupported()
+    if not _is_valid_residue(claimed_ref) or not _is_valid_residue(alt):
+        # The HGVS parser accepts any single uppercase letter as a residue code
+        # without checking it's a real amino acid (e.g. "R175Z" parses "cleanly"
+        # with alt="Z", which isn't a standard residue). Reject before it can
+        # produce a fabricated mutant sequence containing a non-amino-acid letter.
+        return _unsupported()
 
     protein = sequence_provider.fetch(identifier)
     if position < 1 or position > len(protein.sequence):
@@ -140,6 +153,14 @@ def validate_mutation(
         wildtype_sequence=protein.sequence,
         mutant_sequence=mutant_sequence,
     )
+
+
+def _is_valid_residue(code: str) -> bool:
+    try:
+        aa1_to_aa3(code)
+    except KeyError:
+        return False
+    return True
 
 
 def _classify_from_notation(raw: str) -> MutationType | None:

@@ -108,6 +108,31 @@ def test_rejects_splice_variant_as_out_of_scope():
     _assert_out_of_scope("c.375+1G>A", "splice")
 
 
+def test_invalid_reference_residue_letter_is_rejected_not_crashed():
+    # Z is not a standard amino acid code but matches the shorthand regex
+    # (single uppercase letter) and the HGVS parser accepts it uncritically.
+    provider = FakeSequenceProvider(
+        FakeProtein(accession="P04637", sequence=_sequence_with_residue(175, "R"))
+    )
+    result = validate_mutation("P04637", "Z175H", sequence_provider=provider)
+    assert result.status == "unsupported_type"
+    assert result.error_message == OUT_OF_SCOPE_MESSAGE
+    assert result.mutant_sequence is None
+
+
+def test_invalid_alt_residue_letter_is_rejected_not_silently_valid():
+    # Regression: this used to return status="valid" with a mutant_sequence
+    # containing a literal "Z" spliced in — a fabricated, non-amino-acid
+    # mutant sequence silently treated as valid.
+    provider = FakeSequenceProvider(
+        FakeProtein(accession="P04637", sequence=_sequence_with_residue(175, "R"))
+    )
+    result = validate_mutation("P04637", "R175Z", sequence_provider=provider)
+    assert result.status == "unsupported_type"
+    assert result.error_message == OUT_OF_SCOPE_MESSAGE
+    assert result.mutant_sequence is None
+
+
 def test_accepts_already_normalized_hgvs_protein_missense():
     provider = FakeSequenceProvider(
         FakeProtein(accession="P04637", sequence=_sequence_with_residue(175, "R"))
