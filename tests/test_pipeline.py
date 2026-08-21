@@ -104,7 +104,7 @@ class FakePdb:
         self.hit = hit
         self.calls: list[str] = []
 
-    def search_by_uniprot(self, accession: str, preferred_ligands: tuple[str, ...] = ()) -> dict | None:
+    def search_by_uniprot(self, accession: str, preferred_ligands: tuple[str, ...] = (), *, position: int | None = None) -> dict | None:
         self.calls.append(accession)
         return self.hit
 

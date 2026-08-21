@@ -17,7 +17,7 @@ StructureStatus = Literal["found", "unavailable"]
 
 class PdbClient(Protocol):
     def search_by_uniprot(
-        self, accession: str, preferred_ligands: tuple[str, ...] = ()
+        self, accession: str, preferred_ligands: tuple[str, ...] = (), *, position: int | None = None
     ) -> dict | None: ...
 
 
@@ -102,7 +102,7 @@ def source_structure(
     accession = validation.uniprot_accession
 
     try:
-        pdb_hit = pdb_client.search_by_uniprot(accession, preferred_ligands=preferred_ligands)
+        pdb_hit = pdb_client.search_by_uniprot(accession, preferred_ligands=preferred_ligands, position=position)
     except RcsbError:
         pdb_hit = None
     if pdb_hit:
