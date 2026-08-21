@@ -212,3 +212,49 @@ def test_live_rcsb_braf_v600e_finds_a_structure_covering_position_600():
     hit = RcsbPdbClient().search_by_uniprot("P15056", position=600)
     assert hit is not None
     assert _covers_residue(hit["pdb_text"], 600)
+
+
+def test_inchikey_from_chemcomp_uses_confirmed_rcsb_descriptor_field():
+    from secondlook.rcsb import inchikey_from_chemcomp
+
+    assert (
+        inchikey_from_chemcomp({"rcsb_chem_comp_descriptor": {"InChIKey": "HNEIRZJZTYYDES-VPZBFSRCSA-N"}})
+        == "HNEIRZJZTYYDES-VPZBFSRCSA-N"
+    )
+
+
+def test_inchikey_from_chemcomp_falls_back_to_pdbx_descriptor_list():
+    from secondlook.rcsb import inchikey_from_chemcomp
+
+    assert (
+        inchikey_from_chemcomp(
+            {
+                "pdbx_chem_comp_descriptor": [
+                    {"type": "SMILES", "descriptor": "C"},
+                    {"type": "InChIKey", "descriptor": "HNEIRZJZTYYDES-VPZBFSRCSA-N"},
+                ]
+            }
+        )
+        == "HNEIRZJZTYYDES-VPZBFSRCSA-N"
+    )
+
+
+def test_chemcomp_connection_error_is_wrapped_not_raised_raw():
+    client = RcsbPdbClient(client=ConnectionResetClient())
+    with pytest.raises(RcsbError):
+        client.fetch_chemcomp_inchikey("065")
+
+
+def test_chemcomp_missing_inchikey_is_rcsb_error():
+    class EmptyChemcomp:
+        def request(self, method, url, json=None, timeout=None):
+            return FakeResponse(json_body={"chem_comp": {"id": "XXX"}})
+
+    client = RcsbPdbClient(client=EmptyChemcomp())
+    with pytest.raises(RcsbError, match="no InChIKey"):
+        client.fetch_chemcomp_inchikey("XXX")
+
+
+@pytest.mark.integration
+def test_live_chemcomp_065_returns_confirmed_inchikey():
+    assert RcsbPdbClient().fetch_chemcomp_inchikey("065") == "HNEIRZJZTYYDES-VPZBFSRCSA-N"

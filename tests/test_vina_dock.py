@@ -156,6 +156,26 @@ def test_protein_atoms_only_keeps_one_altloc_not_both():
     assert n_lines[0][16] == "A"
 
 
+TWO_CHAIN_PDB = """\
+ATOM      1  CA  ASP A  30      1.000   0.000   0.000  1.00 20.00           C
+ATOM      2  CA  ASP B  30      9.000   0.000   0.000  1.00 20.00           C
+ATOM      3  CA  ALA A  31      2.000   0.000   0.000  1.00 20.00           C
+ATOM      4  CA  ALA B  31     10.000   0.000   0.000  1.00 20.00           C
+HETATM    5  C1  LIG A  99      0.000   0.000   0.000  1.00 20.00           C
+END
+"""
+
+
+def test_chain_atoms_only_keeps_the_chain_covering_the_residue():
+    from secondlook.vina_dock import chain_atoms_only
+
+    chain_a = chain_atoms_only(TWO_CHAIN_PDB, "A")
+    atoms = [line for line in chain_a.splitlines() if line.startswith("ATOM")]
+    assert len(atoms) == 2
+    assert all(line[21] == "A" for line in atoms)
+    assert not any(line[21] == "B" for line in chain_a.splitlines() if line.startswith("ATOM"))
+
+
 def test_score_reports_mutant_minus_wildtype_delta():
     dock = FakeDock(scores=[-8.0, -6.5])
     client = VinaDockClient(
@@ -321,7 +341,7 @@ def test_score_binding_maps_vina_errors_to_binding_unavailable_message():
         candidate,
         mcsm_client=type("M", (), {"submit": staticmethod(lambda **k: (_ for _ in ()).throw(Exception("unused")))})(),
         vina_client=RaisingVina(),
-        het_resolver=type("H", (), {"resolve": staticmethod(lambda *a: None)})(),
+        het_resolver=type("H", (), {"resolve": staticmethod(lambda *a, **k: None)})(),
         sleeper=lambda _: None,
     )
     assert result.status == "unavailable"
@@ -336,6 +356,22 @@ def test_9c5s_tp53_r175h_cannot_place_uniprot_residue_on_fragment():
     client = VinaDockClient(timeout_seconds=30.0, seed=1, exhaustiveness=1)
     with pytest.raises((MutantPlacementError, NoBindingSiteError)):
         client.score(pdb_text=pdb_text, smiles="Fc1c[nH]c(=O)[nH]c1=O", mutation="R175H", position=175)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("pdb_id,position", [("8PQD", 816), ("8C7X", 600), ("4Z55", 1202)])
+def test_receptor_prep_succeeds_on_gold_standard_crystal_structures(pdb_id, position):
+    import httpx
+
+    from secondlook.binding import chain_for_residue
+    from secondlook.vina_dock import MeekoReceptorPreparer, chain_atoms_only, protein_atoms_only
+
+    pdb_text = httpx.get(f"https://files.rcsb.org/download/{pdb_id}.pdb", timeout=60.0).text
+    chain = chain_for_residue(pdb_text, position)
+    protein = protein_atoms_only(chain_atoms_only(pdb_text, chain))
+    pdbqt = MeekoReceptorPreparer().to_pdbqt(protein)
+    assert pdbqt.strip()
+    assert "ATOM" in pdbqt
 
 
 @pytest.mark.integration

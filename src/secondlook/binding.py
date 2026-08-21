@@ -90,7 +90,9 @@ class VinaClient(Protocol):
 
 
 class HetCodeResolver(Protocol):
-    def resolve(self, drug_name: str, structure: StructureResult) -> str | None: ...
+    def resolve(
+        self, drug_name: str, structure: StructureResult, *, smiles: str | None = None
+    ) -> str | None: ...
 
 
 _AFFINITY = re.compile(
@@ -180,20 +182,68 @@ def het_codes_from_pdb(pdb_text: str) -> tuple[str, ...]:
     return tuple(codes)
 
 
-class StructureHetResolver:
-    """Resolve a candidate to a PDB HET code; None means mCSM-lig cannot run."""
+def _inchikey_from_smiles(smiles: str) -> str | None:
+    try:
+        from rdkit import Chem
+    except ImportError:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    return Chem.MolToInchiKey(mol)
 
-    def resolve(self, drug_name: str, structure: StructureResult) -> str | None:
-        if not structure.pdb_text:
+
+def _inchikey_connectivity(inchikey: str) -> str:
+    return inchikey.split("-", 1)[0]
+
+
+class StructureHetResolver:
+    """Resolve a candidate to a PDB HET code by InChIKey identity, not name matching."""
+
+    def __init__(self, chemcomp_client=None) -> None:
+        self._chemcomp = chemcomp_client
+        self._inchikey_cache: dict[str, str | None] = {}
+
+    def resolve(
+        self, drug_name: str, structure: StructureResult, *, smiles: str | None = None
+    ) -> str | None:
+        del drug_name  # names are not chemical identity; kept for the protocol
+        if not structure.pdb_text or not smiles:
+            return None
+        drug_key = _inchikey_from_smiles(smiles)
+        if not drug_key:
             return None
         codes = het_codes_from_pdb(structure.pdb_text)
-        if not codes:
-            return None
-        needle = re.sub(r"[^A-Z0-9]", "", drug_name.upper())
+        connectivity_hit: str | None = None
         for code in codes:
-            if code.upper() in needle or needle.endswith(code.upper()):
+            het_key = self._inchikey_for_het(code)
+            if not het_key:
+                continue
+            if het_key == drug_key:
                 return code
-        return None
+            if connectivity_hit is None and _inchikey_connectivity(het_key) == _inchikey_connectivity(
+                drug_key
+            ):
+                connectivity_hit = code
+        return connectivity_hit
+
+    def _inchikey_for_het(self, het_code: str) -> str | None:
+        if het_code in self._inchikey_cache:
+            return self._inchikey_cache[het_code]
+        from secondlook.rcsb import RcsbError
+
+        client = self._chemcomp
+        if client is None:
+            from secondlook.rcsb import RcsbPdbClient
+
+            client = RcsbPdbClient()
+            self._chemcomp = client
+        try:
+            key = client.fetch_chemcomp_inchikey(het_code)
+        except RcsbError:
+            key = None
+        self._inchikey_cache[het_code] = key
+        return key
 
 
 def score_binding(
@@ -232,7 +282,7 @@ def score_binding(
     try:
         if not structure.ligand_bound:
             raise McsmApoStructureError("Structure has no bound ligand")
-        het = het_resolver.resolve(candidate.name, structure)
+        het = het_resolver.resolve(candidate.name, structure, smiles=candidate.smiles)
         if not het:
             raise McsmNoHetCodeError(f"No PDB HET code for {candidate.name}")
         chain = chain_for_residue(structure.pdb_text, validation.position)

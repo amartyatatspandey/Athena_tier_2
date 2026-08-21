@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from urllib.parse import quote
+
 import httpx
 
 DEFAULT_SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
@@ -13,6 +15,26 @@ DEFAULT_FILES_URL = "https://files.rcsb.org/download"
 
 class RcsbError(RuntimeError):
     pass
+
+
+def inchikey_from_chemcomp(data: dict) -> str | None:
+    """Pull InChIKey from a RCSB chemcomp JSON payload.
+
+    Confirmed field on live responses (e.g. ligand 065): rcsb_chem_comp_descriptor.InChIKey.
+    pdbx_chem_comp_descriptor entries with type InChIKey are the fallback.
+    """
+    desc = data.get("rcsb_chem_comp_descriptor") or {}
+    key = desc.get("InChIKey") if isinstance(desc, dict) else None
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    for item in data.get("pdbx_chem_comp_descriptor") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "InChIKey":
+            descriptor = item.get("descriptor")
+            if isinstance(descriptor, str) and descriptor.strip():
+                return descriptor.strip()
+    return None
 
 
 def _covers_residue(pdb_text: str, position: int) -> bool:
@@ -178,6 +200,20 @@ class RcsbPdbClient:
         if not text.strip():
             raise RcsbError(f"RCSB returned an empty structure file for {pdb_id}")
         return text
+
+    def fetch_chemcomp_inchikey(self, het_code: str) -> str:
+        url = f"{self.data_url}/core/chemcomp/{quote(het_code)}"
+        response = self._request("GET", url)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RcsbError(f"RCSB chemcomp response for {het_code} was not JSON") from exc
+        if not isinstance(data, dict):
+            raise RcsbError(f"RCSB chemcomp response for {het_code} was not an object")
+        key = inchikey_from_chemcomp(data)
+        if not key:
+            raise RcsbError(f"RCSB chemcomp response for {het_code} has no InChIKey")
+        return key
 
     def _request(self, method: str, url: str, json: dict | None = None) -> httpx.Response:
         try:

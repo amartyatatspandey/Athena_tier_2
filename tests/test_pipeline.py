@@ -194,7 +194,7 @@ class FakeHet:
         self.code = code
         self.calls: list[str] = []
 
-    def resolve(self, drug_name: str, structure) -> str | None:
+    def resolve(self, drug_name: str, structure, *, smiles=None) -> str | None:
         self.calls.append(drug_name)
         return self.code
 

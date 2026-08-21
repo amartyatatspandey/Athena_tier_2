@@ -173,6 +173,34 @@ def protein_atoms_only(pdb_text: str) -> str:
     return "\n".join(kept) + "\n"
 
 
+def chain_atoms_only(pdb_text: str, chain: str) -> str:
+    """Keep ATOM/HETATM records for one polymer chain (crystallographic copy)."""
+    kept: list[str] = []
+    for line in pdb_text.splitlines():
+        if line.startswith(("TER", "END")):
+            kept.append(line)
+            continue
+        if line.startswith(("ATOM", "HETATM")) and (line[21].strip() or "A") == chain:
+            kept.append(line)
+    if not any(line.startswith("ATOM") for line in kept):
+        raise ReceptorPrepError(f"PDB text has no ATOM records for chain {chain}")
+    return "\n".join(kept) + "\n"
+
+
+def _is_hydrogen_atom_line(line: str) -> bool:
+    if not line.startswith("ATOM"):
+        return False
+    element = line[76:78].strip() if len(line) >= 78 else ""
+    name = line[12:16].strip()
+    return element == "H" or (not element and name.startswith("H"))
+
+
+def strip_hydrogens(pdb_text: str) -> str:
+    """Drop hydrogen ATOM records. Meeko treats hydrogens as optional and adds its own."""
+    kept = [line for line in pdb_text.splitlines() if not _is_hydrogen_atom_line(line)]
+    return "\n".join(kept) + "\n"
+
+
 class PdbFixerProtonator:
     def protonate(self, pdb_text: str) -> str:
         try:
@@ -211,12 +239,78 @@ class PdbFixerMutantBuilder:
             )
         except MutantPlacementError:
             raise
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise MutantPlacementError(f"PDBFixer could not place {mutation}: {exc}") from exc
+
+
+def _update_h_positions_stable_indices(mol, indices_to_update: list[int]) -> None:
+    """Place template hydrogens without relying on RDKit atom-object indices.
+
+    meeko 0.7.1's update_H_positions keeps Atom objects across RWMol.RemoveAtom +
+    Chem.AddHs. On RDKit 2026 those objects' GetIdx() no longer track the rewritten
+    mol, so AddHs creates the hydrogens but only one of them is copied back
+    ("Updated 1 H positions but deleted N"). Index through the heavy-atom order
+    instead. Meeko docs: input hydrogens are optional; this only assigns coords
+    for hydrogens the template already declared.
+    """
+    from rdkit import Chem
+
+    if not indices_to_update:
+        return
+    conf = mol.GetConformer()
+    parent_orig: dict[int, int] = {}
+    for h_index in indices_to_update:
+        atom = mol.GetAtomWithIdx(h_index)
+        if atom.GetAtomicNum() != 1:
+            raise RuntimeError("only H positions can be updated")
+        parents = [n.GetIdx() for n in atom.GetNeighbors() if n.GetAtomicNum() != 1]
+        if len(parents) != 1:
+            raise RuntimeError(f"hydrogens must have 1 non-H neighbor, got {len(parents)}")
+        parent_orig[h_index] = parents[0]
+    orig_heavy = [i for i in range(mol.GetNumAtoms()) if mol.GetAtomWithIdx(i).GetAtomicNum() != 1]
+    orig_to_new = {orig: new for new, orig in enumerate(orig_heavy)}
+    heavy = Chem.RWMol(mol)
+    hs = [i for i, atom in enumerate(heavy.GetAtoms()) if atom.GetAtomicNum() == 1]
+    for i in sorted(hs, reverse=True):
+        heavy.RemoveAtom(i)
+    heavy_mol = heavy.GetMol()
+    heavy_mol.UpdatePropertyCache(strict=False)
+    for orig_p in parent_orig.values():
+        atom = heavy_mol.GetAtomWithIdx(orig_to_new[orig_p])
+        atom.SetNumExplicitHs(atom.GetNumExplicitHs() + 1)
+        atom.SetNoImplicit(True)
+    only = sorted({orig_to_new[parent] for parent in parent_orig.values()})
+    added = Chem.AddHs(heavy_mol, onlyOnAtoms=only, addCoords=True)
+    added_conf = added.GetConformer()
+    n_heavy = heavy_mol.GetNumAtoms()
+    used: set[int] = set()
+    for h_index, orig_p in parent_orig.items():
+        new_p = orig_to_new[orig_p]
+        for neigh in added.GetAtomWithIdx(new_p).GetNeighbors():
+            if neigh.GetAtomicNum() == 1 and neigh.GetIdx() >= n_heavy and neigh.GetIdx() not in used:
+                conf.SetAtomPosition(h_index, added_conf.GetAtomPosition(neigh.GetIdx()))
+                used.add(neigh.GetIdx())
+                break
+    if len(used) != len(indices_to_update):
+        raise RuntimeError(
+            f"Updated {len(used)} H positions but deleted {len(indices_to_update)}"
+        )
+
+
+def _patch_meeko_hydrogen_placement() -> None:
+    import meeko.polymer as polymer
+
+    current = polymer.update_H_positions
+    if getattr(current, "_secondlook_stable_indices", False):
+        return
+    polymer.update_H_positions = _update_h_positions_stable_indices
+    _update_h_positions_stable_indices._secondlook_stable_indices = True  # type: ignore[attr-defined]
 
 
 class MeekoReceptorPreparer:
     def to_pdbqt(self, pdb_text: str) -> str:
+        _patch_meeko_hydrogen_placement()
+        pdb_text = strip_hydrogens(pdb_text)
         try:
             from meeko import MoleculePreparation, PDBQTWriterLegacy, Polymer, ResidueChemTemplates
             from meeko.polymer import PolymerCreationError
@@ -225,7 +319,13 @@ class MeekoReceptorPreparer:
         try:
             templates = ResidueChemTemplates.create_from_defaults()
             mk_prep = MoleculePreparation()
-            polymer = Polymer.from_pdb_string(pdb_text, templates, mk_prep, allow_bad_res=True)
+            polymer = Polymer.from_pdb_string(
+                pdb_text,
+                templates,
+                mk_prep,
+                allow_bad_res=True,
+                default_altloc="A",
+            )
             rigid, _flex = PDBQTWriterLegacy.write_string_from_polymer(polymer)
         except (PolymerCreationError, RuntimeError, ValueError, KeyError) as exc:
             raise ReceptorPrepError(f"meeko receptor prep failed: {exc}") from exc
@@ -324,12 +424,15 @@ class VinaDockClient:
         seed: int = DEFAULT_SEED,
         exhaustiveness: int = DEFAULT_EXHAUSTIVENESS,
     ) -> None:
-        defaults = receptor_preparer is None
         self._receptor_preparer = receptor_preparer or MeekoReceptorPreparer()
         self._mutant_builder = mutant_builder or PdbFixerMutantBuilder()
         self._ligand_preparer = ligand_preparer or MeekoLigandPreparer()
         self._dock_engine = dock_engine or VinaEngine(exhaustiveness=exhaustiveness)
-        self._protonator = protonator if protonator is not None else (PdbFixerProtonator() if defaults else None)
+        # Meeko's receptor templates add hydrogens themselves (docs: hydrogens are
+        # optional on input). PDBFixer protonation before meeko is the path that
+        # produced "Updated 1 H positions but deleted N" / padding errors on real
+        # crystal structures, so it is not the default.
+        self._protonator = protonator
         self.timeout_seconds = timeout_seconds
         self.seed = seed
 
@@ -342,7 +445,8 @@ class VinaDockClient:
         position: int,
     ) -> BindingScore:
         box = grid_box_from_pdb(pdb_text)
-        protein = protein_atoms_only(pdb_text)
+        chain = chain_for_residue(pdb_text, position)
+        protein = protein_atoms_only(chain_atoms_only(pdb_text, chain))
         wildtype_pdb = self._protonator.protonate(protein) if self._protonator else protein
         mutant_pdb = self._mutant_builder.place_sidechain(protein, mutation, position)
         wildtype_pdbqt = self._receptor_preparer.to_pdbqt(wildtype_pdb)
@@ -389,13 +493,36 @@ def _pdbfixer_complete(pdb_text: str, mutations: list[str] | None, chain: str | 
     fixer = PDBFixer(pdbfile=StringIO(pdb_text))
     if mutations and chain is not None:
         fixer.applyMutations(mutations, chain)
-    fixer.findMissingResidues()
-    fixer.missingResidues = {}
-    fixer.findNonstandardResidues()
-    fixer.replaceNonstandardResidues()
-    fixer.findMissingAtoms()
-    fixer.addMissingAtoms()
-    fixer.addMissingHydrogens(PHYSIOLOGICAL_PH)
+        # Filling truncated sidechains on *unrelated* residues (e.g. 8PQD A:761/A:763)
+        # makes meeko treat a chain-break as a real polymer bond and fail with
+        # "Expected 2 paddings ... but got 0". Only complete atoms on the residue
+        # we actually mutated. Hydrogens stay off — meeko adds them from templates.
+        # findMissingResidues() must still run: findMissingAtoms() reads
+        # fixer.missingResidues even when we refuse to model the gaps.
+        fixer.findMissingResidues()
+        fixer.missingResidues = {}
+        mutated_resseq = {part.split("-")[1] for part in mutations}
+        fixer.findMissingAtoms()
+        fixer.missingAtoms = {
+            residue: atoms
+            for residue, atoms in fixer.missingAtoms.items()
+            if str(residue.id) in mutated_resseq
+        }
+        if hasattr(fixer, "missingTerminals"):
+            fixer.missingTerminals = {
+                residue: groups
+                for residue, groups in fixer.missingTerminals.items()
+                if str(residue.id) in mutated_resseq
+            }
+        fixer.addMissingAtoms()
+    else:
+        fixer.findMissingResidues()
+        fixer.missingResidues = {}
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens(PHYSIOLOGICAL_PH)
     out = StringIO()
     PDBFile.writeFile(fixer.topology, fixer.positions, out, keepIds=True)
     return out.getvalue()

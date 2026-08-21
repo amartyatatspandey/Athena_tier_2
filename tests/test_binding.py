@@ -113,7 +113,7 @@ class FakeHet:
         self.code = code
         self.calls: list[str] = []
 
-    def resolve(self, drug_name: str, structure: StructureResult) -> str | None:
+    def resolve(self, drug_name: str, structure: StructureResult, *, smiles: str | None = None) -> str | None:
         self.calls.append(drug_name)
         return self.code
 
@@ -141,6 +141,141 @@ def test_mutation_shorthand_from_validated_result():
 
 def test_chain_comes_from_structure_not_assumed_a():
     assert chain_for_residue(CHAIN_B_PDB, 30) == "B"
+
+
+IMA_SUBSTRING_PDB = """\
+ATOM      1  CA  ASP A  30      1.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  IMA A  99      0.000   0.000   0.000  1.00 20.00           C
+"""
+
+NINE_VV_PDB = """\
+ATOM      1  CA  ASP A 816      1.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  9VV A 901      0.000   0.000   0.000  1.00 20.00           C
+"""
+
+LIGAND_065_PDB = """\
+ATOM      1  CA  ASP A  30      1.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  065 A  99      0.000   0.000   0.000  1.00 20.00           C
+"""
+
+IMATINIB_SMILES = "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1"
+# RCSB stereo SMILES for chemcomp 065 (2Z4O's ligand); InChIKey HNEIRZJZTYYDES-VPZBFSRCSA-N
+LIGAND_065_SMILES = (
+    "CC(C)C[N@@](C[C@H]([C@H](Cc1ccccc1)NC(=O)O[C@H]2CO[C@@H]3[C@H]2CCO3)O)"
+    "S(=O)(=O)c4ccc5c(c4)OCO5"
+)
+LIGAND_065_SMILES_NOSTEREO = (
+    "CC(C)CN(CC(C(Cc1ccccc1)NC(=O)OC2COC3C2CCO3)O)S(=O)(=O)c4ccc5c(c4)OCO5"
+)
+LIGAND_065_INCHIKEY = "HNEIRZJZTYYDES-VPZBFSRCSA-N"
+NINE_VV_INCHIKEY = "JWBYZGLZBJQWBU-NDEPHWFRSA-N"
+
+
+class FakeChemcomp:
+    def __init__(self, keys: dict[str, str | None], error_for: set[str] | None = None) -> None:
+        self.keys = keys
+        self.error_for = error_for or set()
+        self.calls: list[str] = []
+
+    def fetch_chemcomp_inchikey(self, het_code: str) -> str:
+        from secondlook.rcsb import RcsbError
+
+        self.calls.append(het_code)
+        if het_code in self.error_for:
+            raise RcsbError(f"chemcomp lookup failed for {het_code}")
+        key = self.keys.get(het_code)
+        if not key:
+            raise RcsbError(f"no InChIKey for {het_code}")
+        return key
+
+
+def _het_structure(pdb_text: str) -> StructureResult:
+    return StructureResult(
+        status="found",
+        source="PDB",
+        id="TEST",
+        plddt_at_residue=None,
+        plddt_global=None,
+        reliability_flag="high",
+        ligand_bound=True,
+        annotated_position=30,
+        pdb_text=pdb_text,
+    )
+
+
+def test_het_resolver_does_not_match_on_drug_name_substring():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver(chemcomp_client=FakeChemcomp({"IMA": "NOTIMATINIB-AAAAAAAA-N"}))
+    assert resolver.resolve("IMATINIB", _het_structure(IMA_SUBSTRING_PDB), smiles=IMATINIB_SMILES) is None
+
+
+def test_het_resolver_imatinib_does_not_match_9vv():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver(chemcomp_client=FakeChemcomp({"9VV": NINE_VV_INCHIKEY}))
+    assert resolver.resolve("IMATINIB", _het_structure(NINE_VV_PDB), smiles=IMATINIB_SMILES) is None
+
+
+def test_het_resolver_matches_065_by_exact_inchikey():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver(chemcomp_client=FakeChemcomp({"065": LIGAND_065_INCHIKEY}))
+    assert resolver.resolve("EXAMPLE", _het_structure(LIGAND_065_PDB), smiles=LIGAND_065_SMILES) == "065"
+
+
+def test_het_resolver_falls_back_to_inchikey_connectivity_layer():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver(chemcomp_client=FakeChemcomp({"065": LIGAND_065_INCHIKEY}))
+    assert (
+        resolver.resolve("EXAMPLE", _het_structure(LIGAND_065_PDB), smiles=LIGAND_065_SMILES_NOSTEREO)
+        == "065"
+    )
+
+
+def test_het_resolver_skips_failed_chemcomp_lookup_and_checks_other_codes():
+    from secondlook.binding import StructureHetResolver
+
+    mixed = """\
+ATOM      1  CA  ASP A  30      1.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  BAD A  98      0.000   0.000   0.000  1.00 20.00           C
+HETATM    3  C1  065 A  99      1.000   0.000   0.000  1.00 20.00           C
+"""
+    resolver = StructureHetResolver(
+        chemcomp_client=FakeChemcomp({"065": LIGAND_065_INCHIKEY}, error_for={"BAD"})
+    )
+    assert resolver.resolve("EXAMPLE", _het_structure(mixed), smiles=LIGAND_065_SMILES) == "065"
+
+
+def test_het_resolver_caches_chemcomp_lookups_within_one_call():
+    from secondlook.binding import StructureHetResolver
+
+    duplicate = """\
+ATOM      1  CA  ASP A  30      1.000   0.000   0.000  1.00 20.00           C
+HETATM    2  C1  065 A  99      0.000   0.000   0.000  1.00 20.00           C
+HETATM    3  C2  065 A  99      1.000   0.000   0.000  1.00 20.00           C
+"""
+    client = FakeChemcomp({"065": LIGAND_065_INCHIKEY})
+    resolver = StructureHetResolver(chemcomp_client=client)
+    resolver.resolve("EXAMPLE", _het_structure(duplicate), smiles=LIGAND_065_SMILES)
+    resolver.resolve("EXAMPLE", _het_structure(duplicate), smiles=LIGAND_065_SMILES)
+    assert client.calls == ["065"]
+
+
+def test_het_resolver_without_smiles_returns_none_not_a_name_match():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver(chemcomp_client=FakeChemcomp({"IMA": "NOTIMATINIB-AAAAAAAA-N"}))
+    assert resolver.resolve("IMATINIB", _het_structure(IMA_SUBSTRING_PDB), smiles=None) is None
+
+
+@pytest.mark.integration
+def test_live_065_resolves_by_chemical_identity():
+    from secondlook.binding import StructureHetResolver
+
+    resolver = StructureHetResolver()
+    assert resolver.resolve("EXAMPLE", _het_structure(LIGAND_065_PDB), smiles=LIGAND_065_SMILES) == "065"
 
 
 def test_mcsm_success_uses_parsed_delta_as_the_reported_score():
