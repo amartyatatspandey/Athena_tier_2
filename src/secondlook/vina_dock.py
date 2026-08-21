@@ -334,6 +334,25 @@ class MeekoReceptorPreparer:
         return rigid
 
 
+def _largest_fragment(mol):
+    """Drop salt counter-ions (e.g. "...hydrochloride" SMILES = drug + Cl-).
+
+    PubChem's canonical SMILES for a salt-form drug name is multi-fragment;
+    meeko's MoleculePreparation.prepare() raises ValueError("RDKit molecule
+    has N fragments") on those rather than silently picking one, and that
+    ValueError previously wasn't caught here at all (aborted the whole
+    mutation, not just this candidate). The active pharmaceutical ingredient
+    for docking purposes is the largest fragment by atom count; keep it and
+    proceed instead of just failing when the input happens to be a salt.
+    """
+    from rdkit import Chem
+
+    frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+    if len(frags) <= 1:
+        return mol
+    return max(frags, key=lambda frag: frag.GetNumAtoms())
+
+
 class MeekoLigandPreparer:
     def to_pdbqt(self, smiles: str) -> str:
         try:
@@ -345,15 +364,21 @@ class MeekoLigandPreparer:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise LigandPrepError(f"Cannot parse SMILES: {smiles}")
-        mol = Chem.AddHs(mol)
-        embed = AllChem.EmbedMolecule(mol, randomSeed=DEFAULT_SEED)
-        if embed != 0:
-            raise LigandPrepError(f"Cannot generate a 3D conformer from SMILES: {smiles}")
-        AllChem.UFFOptimizeMolecule(mol)
-        setups = MoleculePreparation().prepare(mol)
-        if not setups:
-            raise LigandPrepError("meeko produced no ligand setup")
-        pdbqt, ok, error_msg = PDBQTWriterLegacy.write_string(setups[0])
+        mol = _largest_fragment(mol)
+        try:
+            mol = Chem.AddHs(mol)
+            embed = AllChem.EmbedMolecule(mol, randomSeed=DEFAULT_SEED)
+            if embed != 0:
+                raise LigandPrepError(f"Cannot generate a 3D conformer from SMILES: {smiles}")
+            AllChem.UFFOptimizeMolecule(mol)
+            setups = MoleculePreparation().prepare(mol)
+            if not setups:
+                raise LigandPrepError("meeko produced no ligand setup")
+            pdbqt, ok, error_msg = PDBQTWriterLegacy.write_string(setups[0])
+        except LigandPrepError:
+            raise
+        except (ValueError, RuntimeError, KeyError, IndexError) as exc:
+            raise LigandPrepError(f"meeko/RDKit ligand prep failed for {smiles}: {exc}") from exc
         if not ok or not pdbqt.strip():
             raise LigandPrepError(error_msg or "meeko failed to write ligand PDBQT")
         return pdbqt

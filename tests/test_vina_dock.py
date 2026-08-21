@@ -291,6 +291,62 @@ def test_meeko_ligand_prep_rejects_unembeddable_smiles():
         MeekoLigandPreparer().to_pdbqt("not-a-smiles")
 
 
+def test_largest_fragment_strips_salt_counter_ion():
+    from rdkit import Chem
+
+    from secondlook.vina_dock import _largest_fragment
+
+    # erlotinib hydrochloride: parent drug + Cl- as two disconnected fragments
+    salt_mol = Chem.MolFromSmiles("COCCOc1cc2ncnc(Nc3cccc(C#C)c3)c2cc1OCCOC.Cl")
+    parent = _largest_fragment(salt_mol)
+    assert parent.GetNumAtoms() == 29
+    assert Chem.MolToSmiles(parent) == Chem.MolToSmiles(
+        Chem.MolFromSmiles("C#Cc1cccc(Nc2ncnc3cc(OCCOC)c(OCCOC)cc23)c1")
+    )
+
+
+def test_largest_fragment_is_a_noop_for_single_fragment_smiles():
+    from rdkit import Chem
+
+    from secondlook.vina_dock import _largest_fragment
+
+    mol = Chem.MolFromSmiles("CCO")
+    assert _largest_fragment(mol) is mol
+
+
+def test_meeko_ligand_prep_succeeds_on_salt_form_smiles_not_a_crash():
+    # Regression: PubChem's canonical SMILES for a "... hydrochloride"-named
+    # drug is drug + Cl- (2 fragments). meeko's prepare() used to raise a raw
+    # ValueError("RDKit molecule has 2 fragments") that wasn't caught at all,
+    # aborting the whole mutation rather than just this one candidate.
+    from secondlook.vina_dock import MeekoLigandPreparer
+
+    pdbqt = MeekoLigandPreparer().to_pdbqt("COCCOc1cc2ncnc(Nc3cccc(C#C)c3)c2cc1OCCOC.Cl")
+    assert pdbqt.strip()
+    assert "Cl" not in pdbqt.split("\n")[0]  # counter-ion isn't part of the prepared ligand
+
+
+def test_meeko_ligand_prep_wraps_unexpected_meeko_errors():
+    # Confirms the safety net (not just the salt-stripping fix) actually
+    # catches a genuine meeko/RDKit failure rather than letting it propagate
+    # raw, the same way "RDKit molecule has 2 fragments" used to.
+    from secondlook.vina_dock import MeekoLigandPreparer
+
+    class RaisingMoleculePreparation:
+        def prepare(self, mol):
+            raise ValueError("simulated meeko failure")
+
+    import meeko
+
+    original_prep_cls = meeko.MoleculePreparation
+    meeko.MoleculePreparation = RaisingMoleculePreparation
+    try:
+        with pytest.raises(LigandPrepError, match="simulated meeko failure"):
+            MeekoLigandPreparer().to_pdbqt("CCO")
+    finally:
+        meeko.MoleculePreparation = original_prep_cls
+
+
 def test_score_binding_maps_vina_errors_to_binding_unavailable_message():
     from secondlook.binding import BINDING_UNAVAILABLE_MESSAGE, score_binding
     from secondlook.candidates import DrugCandidate
